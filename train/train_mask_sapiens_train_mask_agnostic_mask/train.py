@@ -9,7 +9,7 @@ from tqdm import tqdm
 import config
 from model import SapiensModel
 from dataloader import get_dataloader
-from utils import save_checkpoint
+from utils import save_checkpoint, load_latest_checkpoint
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -35,9 +35,10 @@ def main():
     optimizer = AdamW(model.unet.parameters(), lr=config.LEARNING_RATE)
     scaler = GradScaler()
     
-    global_step = 0
+    # Resume
+    start_epoch, global_step = load_latest_checkpoint(model, optimizer, scaler)
     
-    for epoch in range(config.NUM_EPOCHS):
+    for epoch in range(start_epoch, config.NUM_EPOCHS):
         print(f"Epoch {epoch+1}/{config.NUM_EPOCHS}")
         progress_bar = tqdm(dataloader)
         
@@ -104,7 +105,7 @@ def main():
             
             global_step += 1
             
-        save_checkpoint(model, optimizer, epoch, global_step, loss.item())
+        save_checkpoint(model, optimizer, epoch, global_step, loss.item(), scaler)
 
 if __name__ == "__main__":
     main()

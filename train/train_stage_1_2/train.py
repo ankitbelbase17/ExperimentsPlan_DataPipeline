@@ -9,7 +9,7 @@ from tqdm import tqdm
 import config
 from model import StableDiffusionModel
 from dataloader import get_dataloader
-from utils import save_checkpoint
+from utils import save_checkpoint, load_latest_checkpoint
 from inference import run_inference
 import metrics  # Placeholders
 
@@ -42,10 +42,12 @@ def main():
     # Mixed Precision
     scaler = GradScaler()
     
-    # 3. Training Loop
-    global_step = 0
+    # Resume from checkpoint if available
+    start_epoch, global_step = load_latest_checkpoint(sd_model, optimizer, scaler)
     
-    for epoch in range(config.NUM_EPOCHS):
+    # 3. Training Loop
+    
+    for epoch in range(start_epoch, config.NUM_EPOCHS):
         print(f"Epoch {epoch+1}/{config.NUM_EPOCHS}")
         progress_bar = tqdm(dataloader)
         
@@ -117,7 +119,7 @@ def main():
             global_step += 1
             
         # End of Epoch
-        save_checkpoint(sd_model, optimizer, epoch, global_step, current_loss)
+        save_checkpoint(sd_model, optimizer, epoch, global_step, current_loss, scaler)
 
 if __name__ == "__main__":
     main()

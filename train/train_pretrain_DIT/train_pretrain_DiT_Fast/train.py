@@ -10,7 +10,7 @@ from transformers import CLIPTokenizer, CLIPTextModel
 import config
 from model import get_dit_model
 from dataloader import get_dataloader
-from utils import save_checkpoint
+from utils import save_checkpoint, load_latest_checkpoint
 
 def get_text_encoder(device):
     text_encoder = CLIPTextModel.from_pretrained("runwayml/stable-diffusion-v1-5", subfolder="text_encoder")
@@ -51,10 +51,12 @@ def main():
     # Mixed Precision
     scaler = GradScaler()
     
-    # 3. Training Loop
-    global_step = 0
+    # Resume
+    start_epoch, global_step = load_latest_checkpoint(dit_model, optimizer, scaler)
     
-    for epoch in range(config.NUM_EPOCHS):
+    # 3. Training Loop
+    
+    for epoch in range(start_epoch, config.NUM_EPOCHS):
         print(f"Epoch {epoch+1}/{config.NUM_EPOCHS}")
         progress_bar = tqdm(dataloader)
         
@@ -117,7 +119,7 @@ def main():
 
             global_step += 1
             
-        save_checkpoint(dit_model, optimizer, epoch, global_step, current_loss)
+        save_checkpoint(dit_model, optimizer, epoch, global_step, current_loss, scaler)
 
 if __name__ == "__main__":
     main()
