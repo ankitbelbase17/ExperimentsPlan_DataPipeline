@@ -1,0 +1,10 @@
+torch>=2.0.0
+torchvision>=0.15.0
+diffusers>=0.21.0
+transformers>=4.30.0
+accelerate>=0.20.0
+wandb>=0.15.0
+boto3>=1.26.0
+tqdm
+numpy
+Pillow
