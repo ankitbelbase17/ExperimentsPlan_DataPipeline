@@ -28,7 +28,13 @@ MODEL_NAME = "runwayml/stable-diffusion-v1-5"
 IMAGE_SIZE = 512
 
 # AWS S3 Configuration
-AWS_ACCESS_KEY_ID = "YOUR_AWS_ACCESS_KEY"
-AWS_SECRET_ACCESS_KEY = "YOUR_AWS_SECRET_KEY"
-AWS_REGION = "us-east-1"
-S3_BUCKET_NAME = "your-s3-bucket-name"
+# NOTE: Set these environment variables before running:
+# export AWS_ACCESS_KEY_ID="your-access-key"
+# export AWS_SECRET_ACCESS_KEY="your-secret-key"
+# Or configure in Colab: os.environ['AWS_ACCESS_KEY_ID'] = "your-key"
+
+AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID", "")
+AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
+AWS_REGION = os.environ.get("AWS_REGION", "eu-north-1")  # Stockholm region
+S3_BUCKET_NAME = "dipan-dresscode-s3-bucket"
+DRESSCODE_ROOT = "dresscode/dresscode"  # S3 prefix path to dresscode dataset
