@@ -1,198 +1,134 @@
 import torch
 import torch.nn as nn
 from diffusers import AutoencoderKL, UNet2DConditionModel, DDPMScheduler
-from transformers import CLIPTextModel, CLIPTokenizer, CLIPVisionModelWithProjection, CLIPImageProcessor
+from transformers import CLIPTextModel, CLIPTokenizer
 import config
 
+
 class GarmentEncoder(nn.Module):
-    """
-    Garment-specific encoder using CLIP Vision
-    Extracts high-level garment features for conditioning
-    """
-    def __init__(self, feature_dim=768):
+    """Encodes garment features for cross-attention"""
+    def __init__(self, in_channels=4, out_channels=768):
         super().__init__()
-        
-        # Use CLIP Vision for garment encoding
-        self.clip_vision = CLIPVisionModelWithProjection.from_pretrained(
-            "openai/clip-vit-large-patch14"
-        )
-        self.clip_vision.requires_grad_(True)  # Fine-tune CLIP for garments
-        
-        # Project to desired feature dimension
-        self.projection = nn.Sequential(
-            nn.Linear(768, feature_dim),
-            nn.LayerNorm(feature_dim),
-            nn.GELU(),
-            nn.Linear(feature_dim, feature_dim)
+        self.encoder = nn.Sequential(
+            nn.Conv2d(in_channels, 128, 3, padding=1),
+            nn.GroupNorm(32, 128),
+            nn.SiLU(),
+            nn.Conv2d(128, 256, 3, stride=2, padding=1),
+            nn.GroupNorm(32, 256),
+            nn.SiLU(),
+            nn.Conv2d(256, 512, 3, stride=2, padding=1),
+            nn.GroupNorm(32, 512),
+            nn.SiLU(),
+            nn.Conv2d(512, out_channels, 3, padding=1),
         )
         
-    def forward(self, garment_images):
-        """
-        Args:
-            garment_images: [B, 3, H, W] - Garment images (normalized)
-        Returns:
-            garment_features: [B, feature_dim] - Global garment features
-        """
-        # CLIP expects specific normalization
-        outputs = self.clip_vision(pixel_values=garment_images)
-        image_embeds = outputs.image_embeds  # [B, 768]
-        
-        # Project to feature space
-        garment_features = self.projection(image_embeds)  # [B, feature_dim]
-        
-        return garment_features
-
-
-class GatedAttentionFusion(nn.Module):
-    """
-    Gated attention mechanism for fusing garment features with UNet features
-    """
-    def __init__(self, unet_channels, garment_dim):
-        super().__init__()
-        
-        self.garment_proj = nn.Linear(garment_dim, unet_channels)
-        self.gate = nn.Sequential(
-            nn.Linear(unet_channels + garment_dim, unet_channels),
-            nn.Sigmoid()
-        )
-        
-    def forward(self, unet_features, garment_features):
-        """
-        Args:
-            unet_features: [B, C, H, W] - UNet intermediate features
-            garment_features: [B, D] - Garment features
-        Returns:
-            fused_features: [B, C, H, W] - Fused features
-        """
-        B, C, H, W = unet_features.shape
-        
-        # Project garment features and broadcast
-        garment_proj = self.garment_proj(garment_features)  # [B, C]
-        garment_proj = garment_proj.view(B, C, 1, 1).expand(B, C, H, W)
-        
-        # Compute gating weights
-        garment_for_gate = garment_features.view(B, -1, 1, 1).expand(B, -1, H, W)
-        combined = torch.cat([unet_features, garment_for_gate], dim=1)
-        combined_flat = combined.permute(0, 2, 3, 1).reshape(B * H * W, -1)
-        
-        gate_weights = self.gate(combined_flat).reshape(B, H, W, C).permute(0, 3, 1, 2)
-        
-        # Fuse with gating
-        fused = unet_features + gate_weights * garment_proj
-        
-        return fused
+    def forward(self, x):
+        return self.encoder(x)
 
 
 class IDMVTONModel(nn.Module):
     """
-    IDM-VTON: Improving Diffusion Models for Virtual Try-On
-    
-    Architecture:
-    1. Garment Encoder: CLIP-based encoder for garment features
-    2. UNet with Inpainting: SD2-inpainting for masked person synthesis
-    3. Gated Attention Fusion: Fuses garment features into UNet
-    4. DensePose Conditioning: Uses DensePose for body awareness
+    IDM-VTON: Simplified to use only Person + Cloth
+    Uses gated attention fusion instead of mask/densepose
     """
     def __init__(self):
         super().__init__()
         
-        # Load SD2-inpainting components
-        model_name = config.MODEL_NAME
-        
-        self.vae = AutoencoderKL.from_pretrained(model_name, subfolder="vae")
+        # Load pretrained SD2 components
+        self.vae = AutoencoderKL.from_pretrained(
+            config.MODEL_NAME, 
+            subfolder="vae"
+        )
         self.vae.requires_grad_(False)
         
-        self.text_encoder = CLIPTextModel.from_pretrained(model_name, subfolder="text_encoder")
+        self.text_encoder = CLIPTextModel.from_pretrained(
+            config.MODEL_NAME, 
+            subfolder="text_encoder"
+        )
         self.text_encoder.requires_grad_(False)
         
-        self.tokenizer = CLIPTokenizer.from_pretrained(model_name, subfolder="tokenizer")
+        self.tokenizer = CLIPTokenizer.from_pretrained(
+            config.MODEL_NAME, 
+            subfolder="tokenizer"
+        )
         
-        # UNet for inpainting (9 input channels: 4 latent + 4 masked + 1 mask)
+        # Standard UNet
         self.unet = UNet2DConditionModel.from_pretrained(
-            model_name,
-            subfolder="unet"
+            config.MODEL_NAME,
+            subfolder="unet",
+            low_cpu_mem_usage=False,
         )
         
         # Garment encoder
-        if config.USE_GARMENT_ENCODER:
-            self.garment_encoder = GarmentEncoder(feature_dim=config.GARMENT_FEATURE_DIM)
-            
-            # Fusion mechanism
-            if config.FUSION_STRATEGY == "gated_attention":
-                # Add fusion layers for each UNet block (simplified - would need per-block)
-                self.fusion_layers = nn.ModuleList([
-                    GatedAttentionFusion(320, config.GARMENT_FEATURE_DIM),  # Down block 1
-                    GatedAttentionFusion(640, config.GARMENT_FEATURE_DIM),  # Down block 2
-                    GatedAttentionFusion(1280, config.GARMENT_FEATURE_DIM), # Down block 3
-                ])
+        self.garment_encoder = GarmentEncoder(
+            in_channels=4,
+            out_channels=config.GARMENT_FEATURE_DIM if hasattr(config, 'GARMENT_FEATURE_DIM') else 768
+        )
+        
+        # Gated fusion for garment features
+        self.fusion_gate = nn.Sequential(
+            nn.Linear(768, 768),
+            nn.Sigmoid()
+        )
+        
+        self.garment_proj = nn.Linear(768, 768)
         
         # Noise scheduler
-        self.noise_scheduler = DDPMScheduler.from_pretrained(model_name, subfolder="scheduler")
-        
-        # CLIP image processor for garment encoder
-        self.clip_processor = CLIPImageProcessor.from_pretrained("openai/clip-vit-large-patch14")
+        self.noise_scheduler = DDPMScheduler.from_pretrained(
+            config.MODEL_NAME,
+            subfolder="scheduler"
+        )
         
     def encode_images(self, images):
         """Encode images to latent space"""
         latents = self.vae.encode(images).latent_dist.sample()
         return latents * 0.18215
     
-    def forward(self, person_img, garment_img, mask, densepose, text_embeddings, timesteps, noise):
+    def forward(self, person_img, garment_img, text_embeddings, timesteps, noise):
         """
-        Forward pass for IDM-VTON training
+        Simplified IDM-VTON forward (No mask/densepose needed)
         
         Args:
-            person_img: [B, 3, H, W] - Target person image
-            garment_img: [B, 3, H, W] - Garment image
-            mask: [B, 1, H, W] - Binary mask (1=keep, 0=inpaint)
-            densepose: [B, 3, H, W] - DensePose visualization
-            text_embeddings: [B, 77, 768] - CLIP text embeddings
-            timesteps: [B] - Diffusion timesteps
-            noise: [B, 4, H/8, W/8] - Noise to add
-            
+            person_img: [B, 3, H, W]
+            garment_img: [B, 3, H, W]
+            text_embeddings: [B, 77, 768]
+            timesteps: [B]
+            noise: [B, 4, H/8, W/8]
+        
         Returns:
-            noise_pred: [B, 4, H/8, W/8] - Predicted noise
-            garment_features: [B, D] - Extracted garment features (for auxiliary loss)
+            noise_pred: [B, 4, H/8, W/8]
+            garment_features: For auxiliary loss
         """
-        # Encode garment features
-        garment_features = None
-        if config.USE_GARMENT_ENCODER:
-            # Preprocess garment for CLIP
-            garment_features = self.garment_encoder(garment_img)  # [B, D]
-        
-        # Encode person and densepose to latents
+        # Encode to latent space
         person_latents = self.encode_images(person_img)
+        garment_latents = self.encode_images(garment_img)
         
-        # Encode mask to latent resolution
-        mask_latent = torch.nn.functional.interpolate(
-            mask, size=(person_latents.shape[2], person_latents.shape[3])
-        )
+        # Extract garment features
+        garment_features = self.garment_encoder(garment_latents)
+        B, C, H, W = garment_features.shape
+        garment_features_flat = garment_features.view(B, C, -1).permute(0, 2, 1)
         
-        # Add noise to person latents
+        # Gated fusion
+        gate = self.fusion_gate(garment_features_flat)
+        garment_features_gated = garment_features_flat * gate
+        garment_features_proj = self.garment_proj(garment_features_gated)
+        
+        # Combine with text embeddings
+        combined_embeddings = torch.cat([text_embeddings, garment_features_proj], dim=1)
+        
+        # Add noise
         noisy_latents = self.noise_scheduler.add_noise(person_latents, noise, timesteps)
         
-        # Masked latents (for inpainting conditioning)
-        masked_latents = person_latents * mask_latent
-        
-        # Concatenate for inpainting: [noisy_latents, masked_latents, mask]
-        unet_input = torch.cat([
-            noisy_latents,      # [B, 4, H/8, W/8]
-            masked_latents,     # [B, 4, H/8, W/8]
-            mask_latent         # [B, 1, H/8, W/8]
-        ], dim=1)  # Total: [B, 9, H/8, W/8]
-        
-        # UNet prediction with garment conditioning
-        # Note: In practice, garment features would be injected via cross-attention
-        # Here we use the standard text cross-attention
+        # UNet prediction
         noise_pred = self.unet(
-            unet_input,
+            noisy_latents,
             timesteps,
-            encoder_hidden_states=text_embeddings
+            encoder_hidden_states=combined_embeddings
         ).sample
         
         return noise_pred, garment_features
 
 
 def get_idmvton_model():
-    """Factory function to create IDM-VTON model"""
+    """Factory function"""
     return IDMVTONModel()

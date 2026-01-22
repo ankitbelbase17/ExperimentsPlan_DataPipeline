@@ -143,12 +143,25 @@ def main():
                 )
                 return
             
-            # Prepare inputs - CATVTON requires 4 inputs
-            person_img = batch["person_img"].to(device)          # [B, 3, H, W]
-            garment_img = batch["garment_img"].to(device)        # [B, 3, H, W]
-            pose_map = batch["pose_map"].to(device)              # [B, 3, H, W]
-            segmentation = batch["segmentation"].to(device)      # [B, 3, H, W]
-            input_ids = batch["input_ids"].to(device)            # [B, 77]
+            # Prepare inputs - SIMPLIFIED: Only person and garment
+            person_img = batch["initial_image"].to(device) if "initial_image" in batch else batch["person_img"].to(device)
+            garment_img = batch["cloth_image"].to(device) if "cloth_image" in batch else batch["garment_img"].to(device)
+            input_ids = batch.get("input_ids")
+            
+            # Handle missing input_ids (if using S3 dataset without tokenization)
+            if input_ids is None:
+                # Create dummy caption
+                captions = [f"a person wearing a garment" for _ in range(person_img.shape[0])]
+                inputs = catvton_model.tokenizer(
+                    captions,
+                    padding="max_length",
+                    max_length=catvton_model.tokenizer.model_max_length,
+                    truncation=True,
+                    return_tensors="pt"
+                )
+                input_ids = inputs.input_ids.to(device)
+            else:
+                input_ids = input_ids.to(device)
             
             bsz = person_img.shape[0]
             
@@ -169,12 +182,10 @@ def main():
             optimizer.zero_grad()
             
             with autocast():
-                # CATVTON forward: combines person, garment, pose, segmentation
-                noise_pred, tps_params = catvton_model(
+                # SIMPLIFIED CATVTON forward: only person + garment
+                noise_pred, garment_features = catvton_model(
                     person_img=person_img,
                     garment_img=garment_img,
-                    pose_map=pose_map,
-                    segmentation_map=segmentation,
                     text_embeddings=text_embeddings,
                     timesteps=timesteps,
                     noise=noise
@@ -182,12 +193,6 @@ def main():
                 
                 # Main reconstruction loss
                 loss = F.mse_loss(noise_pred, noise, reduction="mean")
-                
-                # Optional: Add warping regularization loss
-                if config.USE_WARPING_MODULE and tps_params is not None:
-                    # Encourage smooth transformations
-                    warp_reg_loss = torch.mean(tps_params ** 2) * 0.01
-                    loss = loss + warp_reg_loss
             
             scaler.scale(loss).backward()
             scaler.step(optimizer)

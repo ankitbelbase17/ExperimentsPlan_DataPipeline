@@ -81,17 +81,13 @@ class CATVTONDataset(Dataset):
         try:
             person_id, garment_id = self.pairs[idx]
             
-            # Load all required images
+            # Load only person and garment images
             person_img = self.load_image_from_s3(f"{self.root_dir}/person/{person_id}.jpg")
             garment_img = self.load_image_from_s3(f"{self.root_dir}/garment/{garment_id}.jpg")
-            pose_map = self.load_image_from_s3(f"{self.root_dir}/pose/{person_id}.jpg")
-            segmentation = self.load_image_from_s3(f"{self.root_dir}/segmentation/{person_id}.png")
             
             # Apply transforms
             person_tensor = self.augment_transforms(person_img)
             garment_tensor = self.image_transforms(garment_img)
-            pose_tensor = self.image_transforms(pose_map)
-            seg_tensor = self.image_transforms(segmentation)
             
             # Text prompt
             caption = f"a person wearing {garment_id}"
@@ -99,8 +95,6 @@ class CATVTONDataset(Dataset):
             example = {
                 "person_img": person_tensor,        # [3, H, W]
                 "garment_img": garment_tensor,      # [3, H, W]
-                "pose_map": pose_tensor,            # [3, H, W]
-                "segmentation": seg_tensor,         # [3, H, W]
                 "input_ids": None,
                 "person_id": person_id,
                 "garment_id": garment_id

@@ -4,72 +4,42 @@ from diffusers import AutoencoderKL, UNet2DConditionModel, DDPMScheduler
 from transformers import CLIPTextModel, CLIPTokenizer
 import config
 
-class WarpingModule(nn.Module):
-    """Thin-Plate Spline (TPS) based warping module for garment alignment"""
-    def __init__(self, num_control_points=5):
+
+class GarmentEncoder(nn.Module):
+    """Encodes garment features for cross-attention with person"""
+    def __init__(self, in_channels=4, out_channels=768):
         super().__init__()
-        self.num_control_points = num_control_points
-        
-        # Feature extractor for garment and person
-        self.garment_encoder = nn.Sequential(
-            nn.Conv2d(3, 64, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(64, 128, 3, stride=2, padding=1),
-            nn.ReLU(),
+        self.encoder = nn.Sequential(
+            nn.Conv2d(in_channels, 128, 3, padding=1),
+            nn.GroupNorm(32, 128),
+            nn.SiLU(),
             nn.Conv2d(128, 256, 3, stride=2, padding=1),
-            nn.ReLU(),
+            nn.GroupNorm(32, 256),
+            nn.SiLU(),
+            nn.Conv2d(256, 512, 3, stride=2, padding=1),
+            nn.GroupNorm(32, 512),
+            nn.SiLU(),
+            nn.Conv2d(512, out_channels, 3, padding=1),
         )
         
-        self.person_encoder = nn.Sequential(
-            nn.Conv2d(3, 64, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(64, 128, 3, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(128, 256, 3, stride=2, padding=1),
-            nn.ReLU(),
-        )
-        
-        # Predict TPS control points
-        self.tps_predictor = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Linear(128, num_control_points * 2 * 2)  # source and target points
-        )
-        
-    def forward(self, garment, person_representation):
+    def forward(self, x):
         """
         Args:
-            garment: [B, 3, H, W] - Garment image
-            person_representation: [B, 3, H, W] - Person pose/segmentation
+            x: [B, 4, H, W] - Garment latents
         Returns:
-            warped_garment: [B, 3, H, W] - Warped garment aligned to person
+            features: [B, 768, H/4, W/4] - Garment features
         """
-        garment_feat = self.garment_encoder(garment)
-        person_feat = self.person_encoder(person_representation)
-        
-        # Concatenate features
-        combined = garment_feat + person_feat
-        
-        # Predict TPS parameters
-        tps_params = self.tps_predictor(combined)
-        
-        # Apply TPS transformation (simplified - use kornia.geometry.transform in practice)
-        # For now, return identity transformation
-        warped_garment = garment
-        
-        return warped_garment, tps_params
+        return self.encoder(x)
 
 
 class CATVTONModel(nn.Module):
     """
-    CATVTON: Concatenation-based Attentive Virtual Try-On Network
+    CATVTON: Simplified version using only Person + Cloth images
     
     Architecture:
-    1. Warping Module: Aligns garment to person pose
-    2. UNet with concatenated inputs: [person, warped_garment, pose, segmentation]
-    3. Attention mechanisms for feature fusion
+    1. Encode person and garment to latent space
+    2. Use garment features as additional conditioning via cross-attention
+    3. UNet predicts noise with dual conditioning (text + garment)
     """
     def __init__(self):
         super().__init__()
@@ -92,20 +62,21 @@ class CATVTONModel(nn.Module):
             subfolder="tokenizer"
         )
         
-        # Modified UNet with additional input channels
-        # Standard: 4 latent channels
-        # CATVTON: 4 (person) + 4 (garment) + 4 (pose) + 4 (segmentation) = 16 channels
+        # Standard UNet (4 input channels for person latents only)
         self.unet = UNet2DConditionModel.from_pretrained(
             config.MODEL_NAME,
             subfolder="unet",
-            in_channels=16,  # Modified input channels
             low_cpu_mem_usage=False,
-            ignore_mismatched_sizes=True
         )
         
-        # Warping module
-        if config.USE_WARPING_MODULE:
-            self.warping_module = WarpingModule()
+        # Garment encoder for cross-attention conditioning
+        self.garment_encoder = GarmentEncoder(
+            in_channels=4,
+            out_channels=config.GARMENT_FEATURE_DIM if hasattr(config, 'GARMENT_FEATURE_DIM') else 768
+        )
+        
+        # Project garment features to match text embedding dimension
+        self.garment_proj = nn.Linear(768, 768)
         
         # Noise scheduler
         self.noise_scheduler = DDPMScheduler.from_pretrained(
@@ -118,54 +89,47 @@ class CATVTONModel(nn.Module):
         latents = self.vae.encode(images).latent_dist.sample()
         return latents * 0.18215
     
-    def forward(self, person_img, garment_img, pose_map, segmentation_map, text_embeddings, timesteps, noise):
+    def forward(self, person_img, garment_img, text_embeddings, timesteps, noise):
         """
-        Forward pass for CATVTON training
+        Forward pass for CATVTON training (SIMPLIFIED - No pose/segmentation needed)
         
         Args:
             person_img: [B, 3, H, W] - Target person image
             garment_img: [B, 3, H, W] - Garment to try on
-            pose_map: [B, 3, H, W] - Pose keypoints visualization
-            segmentation_map: [B, 3, H, W] - Body part segmentation
             text_embeddings: [B, 77, 768] - CLIP text embeddings
             timesteps: [B] - Diffusion timesteps
             noise: [B, 4, H/8, W/8] - Noise to add
             
         Returns:
             noise_pred: [B, 4, H/8, W/8] - Predicted noise
+            garment_features: Garment features for potential auxiliary loss
         """
-        # Warp garment to align with person pose
-        if config.USE_WARPING_MODULE:
-            warped_garment, tps_params = self.warping_module(garment_img, pose_map)
-        else:
-            warped_garment = garment_img
-            tps_params = None
-        
-        # Encode all inputs to latent space
+        # Encode inputs to latent space
         person_latents = self.encode_images(person_img)
-        garment_latents = self.encode_images(warped_garment)
-        pose_latents = self.encode_images(pose_map)
-        seg_latents = self.encode_images(segmentation_map)
+        garment_latents = self.encode_images(garment_img)
+        
+        # Extract garment features for conditioning
+        garment_features = self.garment_encoder(garment_latents)  # [B, 768, H/32, W/32]
+        
+        # Flatten spatial dimensions and project
+        B, C, H, W = garment_features.shape
+        garment_features_flat = garment_features.view(B, C, -1).permute(0, 2, 1)  # [B, H*W, 768]
+        garment_features_proj = self.garment_proj(garment_features_flat)  # [B, H*W, 768]
+        
+        # Concatenate text and garment embeddings for dual conditioning
+        combined_embeddings = torch.cat([text_embeddings, garment_features_proj], dim=1)  # [B, 77+H*W, 768]
         
         # Add noise to person latents (target)
         noisy_latents = self.noise_scheduler.add_noise(person_latents, noise, timesteps)
         
-        # Concatenate all latent inputs
-        unet_input = torch.cat([
-            noisy_latents,      # [B, 4, H/8, W/8]
-            garment_latents,    # [B, 4, H/8, W/8]
-            pose_latents,       # [B, 4, H/8, W/8]
-            seg_latents         # [B, 4, H/8, W/8]
-        ], dim=1)  # Total: [B, 16, H/8, W/8]
-        
-        # UNet prediction
+        # UNet prediction with dual conditioning
         noise_pred = self.unet(
-            unet_input,
+            noisy_latents,
             timesteps,
-            encoder_hidden_states=text_embeddings
+            encoder_hidden_states=combined_embeddings
         ).sample
         
-        return noise_pred, tps_params
+        return noise_pred, garment_features
 
 
 def get_catvton_model():

@@ -76,25 +76,19 @@ class IDMVTONDataset(Dataset):
         try:
             person_id, garment_id = self.pairs[idx]
             
-            # Load images
+            # Load only person and garment
             person_img = self.load_image_from_s3(f"{self.root_dir}/person/{person_id}.jpg")
             garment_img = self.load_image_from_s3(f"{self.root_dir}/garment/{garment_id}.jpg")
-            mask_img = self.load_image_from_s3(f"{self.root_dir}/mask/{person_id}.png")
-            densepose_img = self.load_image_from_s3(f"{self.root_dir}/densepose/{person_id}.jpg")
             
             # Apply transforms
             person_tensor = self.image_transforms(person_img)
             garment_tensor = self.image_transforms(garment_img)
-            mask_tensor = self.mask_transforms(mask_img)[:1]  # Take only first channel
-            densepose_tensor = self.image_transforms(densepose_img)
             
             caption = f"a person wearing {garment_id}"
             
             example = {
-                "person_img": person_tensor,        # [3, H, W]
-                "garment_img": garment_tensor,      # [3, H, W]
-                "mask": mask_tensor,                # [1, H, W]
-                "densepose": densepose_tensor,      # [3, H, W]
+                "person_img": person_tensor,
+                "garment_img": garment_tensor,
                 "input_ids": None,
             }
             

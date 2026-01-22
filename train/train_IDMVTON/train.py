@@ -140,19 +140,24 @@ def main():
                 )
                 return
             
-            # IDM-VTON inputs: person, garment, mask, densepose
-            person_img = batch["person_img"].to(device)          # [B, 3, H, W]
-            garment_img = batch["garment_img"].to(device)        # [B, 3, H, W]
-            mask = batch["mask"].to(device)                      # [B, 1, H, W]
-            input_ids = batch["input_ids"].to(device)            # [B, 77]
+            # SIMPLIFIED: Only person and garment
+            person_img = batch["initial_image"].to(device) if "initial_image" in batch else batch["person_img"].to(device)
+            garment_img = batch["cloth_image"].to(device) if "cloth_image" in batch else batch["garment_img"].to(device)
+            input_ids = batch.get("input_ids")
             
-            # DensePose or improved conditioning
-            if "densepose" in batch:
-                densepose = batch["densepose"].to(device)        # [B, 3, H, W]
+            # Handle missing input_ids
+            if input_ids is None:
+                captions = [f"a person wearing a garment" for _ in range(person_img.shape[0])]
+                inputs = idmvton_model.tokenizer(
+                    captions,
+                    padding="max_length",
+                    max_length=idmvton_model.tokenizer.model_max_length,
+                    truncation=True,
+                    return_tensors="pt"
+                )
+                input_ids = inputs.input_ids.to(device)
             else:
-                 # Fallback if S3 dataset doesn't have densepose yet
-                 # Using person image as proxy for structural guidance in fallback scenario
-                 densepose = person_img 
+                input_ids = input_ids.to(device)
 
             bsz = person_img.shape[0]
             
@@ -176,8 +181,6 @@ def main():
                 noise_pred, garment_features = idmvton_model(
                     person_img=person_img,
                     garment_img=garment_img,
-                    mask=mask,
-                    densepose=densepose,
                     text_embeddings=text_embeddings,
                     timesteps=timesteps,
                     noise=noise
