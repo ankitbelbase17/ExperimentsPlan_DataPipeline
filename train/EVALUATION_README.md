@@ -50,32 +50,48 @@ python inference.py \
 
 ## Test Dataset Structure
 
-Your `dataset_test` directory should follow this structure:
+Your `dataset_test` directory should follow this **minimal** structure:
 
 ```
 dataset_test/
-├── initial_image/          # Person images
+├── initial_image/          # Person images (REQUIRED)
 │   ├── 001_person.png
 │   ├── 002_person.png
 │   └── ...
-├── cloth_image/            # Garment images
+├── cloth_image/            # Garment images (REQUIRED)
 │   ├── 001_cloth_shirt.png
 │   ├── 002_cloth_dress.png
 │   └── ...
-├── try_on_image/           # Ground truth try-on results
-│   ├── 001_vton.png
-│   ├── 002_vton.png
-│   └── ...
-├── mask/                   # (Optional) Garment region masks
-│   ├── 001_mask.png
-│   └── ...
-├── segmentation/           # (Optional) Body part segmentation
-│   ├── 001_seg.png
-│   └── ...
-└── keypoints/              # (Optional) Pose keypoints
-    ├── 001_keypoints.json
+└── try_on_image/           # Ground truth try-on results (REQUIRED)
+    ├── 001_vton.png
+    ├── 002_vton.png
     └── ...
 ```
+
+### Optional Directories (Auto-Generated if Missing)
+
+The evaluation framework will **automatically** extract these using pretrained models:
+
+- **Segmentation** (for mIOU): Extracted using DeepLabV3 ResNet-101
+- **Keypoints** (for PCK): Extracted using Keypoint R-CNN ResNet-50
+
+If you have pre-computed masks, you can optionally include:
+```
+dataset_test/
+└── mask/                   # (Optional) Garment region masks
+    ├── 001_mask.png
+    └── ...
+```
+
+### Automatic Feature Extraction
+
+When you run evaluation, the framework will:
+1. ✅ Load pretrained **DeepLabV3** for semantic segmentation
+2. ✅ Load pretrained **Keypoint R-CNN** for pose estimation
+3. ✅ Extract features on-the-fly for both predicted and ground truth images
+4. ✅ Compute mIOU and PCK automatically
+
+**No manual preprocessing required!**
 
 ## Checkpoint Discovery
 

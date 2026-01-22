@@ -29,7 +29,7 @@ def parse_args():
 
 
 class MetricsCalculator:
-    """Calculate all VTON metrics"""
+    """Calculate all VTON metrics with on-the-fly segmentation and pose extraction"""
     
     def __init__(self, device='cuda'):
         self.device = device
@@ -38,10 +38,87 @@ class MetricsCalculator:
         self.lpips_fn = lpips.LPIPS(net='alex').to(device)
         self.lpips_fn.eval()
         
+        # Initialize pretrained segmentation model (DeepLabV3)
+        try:
+            from torchvision.models.segmentation import deeplabv3_resnet101
+            print("Loading pretrained segmentation model (DeepLabV3)...")
+            self.seg_model = deeplabv3_resnet101(pretrained=True).to(device)
+            self.seg_model.eval()
+            self.has_seg_model = True
+        except Exception as e:
+            print(f"Warning: Could not load segmentation model: {e}")
+            self.has_seg_model = False
+        
+        # Initialize pretrained pose estimation model (OpenPose via MMPose or similar)
+        try:
+            # Using a lightweight pose model from torchvision or mmpose
+            # For simplicity, we'll use a basic keypoint detector
+            from torchvision.models.detection import keypointrcnn_resnet50_fpn
+            print("Loading pretrained pose estimation model (Keypoint R-CNN)...")
+            self.pose_model = keypointrcnn_resnet50_fpn(pretrained=True).to(device)
+            self.pose_model.eval()
+            self.has_pose_model = True
+        except Exception as e:
+            print(f"Warning: Could not load pose model: {e}")
+            self.has_pose_model = False
+        
         self.transform = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
         ])
+        
+        self.seg_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+    
+    def extract_segmentation(self, img):
+        """
+        Extract segmentation mask using pretrained DeepLabV3
+        
+        Args:
+            img: PIL Image
+        Returns:
+            seg_mask: numpy array [H, W] with class labels
+        """
+        if not self.has_seg_model:
+            return None
+        
+        # Preprocess
+        img_tensor = self.seg_transform(img).unsqueeze(0).to(self.device)
+        
+        # Inference
+        with torch.no_grad():
+            output = self.seg_model(img_tensor)['out']
+            seg_mask = output.argmax(1).squeeze(0).cpu().numpy()
+        
+        return seg_mask
+    
+    def extract_keypoints(self, img):
+        """
+        Extract pose keypoints using pretrained Keypoint R-CNN
+        
+        Args:
+            img: PIL Image
+        Returns:
+            keypoints: numpy array [N, 2] with (x, y) coordinates
+        """
+        if not self.has_pose_model:
+            return None
+        
+        # Preprocess
+        img_tensor = transforms.ToTensor()(img).to(self.device)
+        
+        # Inference
+        with torch.no_grad():
+            predictions = self.pose_model([img_tensor])
+        
+        if len(predictions) > 0 and len(predictions[0]['keypoints']) > 0:
+            # Take first person's keypoints
+            keypoints = predictions[0]['keypoints'][0].cpu().numpy()[:, :2]  # [N, 2]
+            return keypoints
+        
+        return None
     
     def compute_lpips(self, img1, img2):
         """
@@ -341,10 +418,37 @@ def evaluate_model(model_name, checkpoint, test_dir, output_dir, device='cuda'):
             all_metrics['masked_lpips'].append(metrics_calc.compute_masked_lpips(pred_img, gt_img, mask_img))
             all_metrics['masked_ssim'].append(metrics_calc.compute_masked_ssim(pred_img, gt_img, mask_img))
         
-        # mIOU (if segmentation available)
-        if 'segmentation' in item:
-            # Note: This requires predicted segmentation - placeholder for now
-            pass
+        # mIOU - Extract segmentation on-the-fly using pretrained model
+        if metrics_calc.has_seg_model:
+            try:
+                pred_seg = metrics_calc.extract_segmentation(pred_img)
+                gt_seg = metrics_calc.extract_segmentation(gt_img)
+                
+                if pred_seg is not None and gt_seg is not None:
+                    miou = metrics_calc.compute_miou(pred_seg, gt_seg, num_classes=21)  # COCO has 21 classes
+                    all_metrics['miou'].append(miou)
+            except Exception as e:
+                print(f"Warning: Could not compute mIOU for {stem}: {e}")
+        
+        # PCK - Extract keypoints on-the-fly using pretrained model
+        if metrics_calc.has_pose_model:
+            try:
+                pred_keypoints = metrics_calc.extract_keypoints(pred_img)
+                gt_keypoints = metrics_calc.extract_keypoints(gt_img)
+                
+                if pred_keypoints is not None and gt_keypoints is not None:
+                    # Ensure same number of keypoints
+                    min_len = min(len(pred_keypoints), len(gt_keypoints))
+                    if min_len > 0:
+                        pck = metrics_calc.compute_pck(
+                            pred_keypoints[:min_len], 
+                            gt_keypoints[:min_len],
+                            threshold=0.1,
+                            image_size=512
+                        )
+                        all_metrics['pck'].append(pck)
+            except Exception as e:
+                print(f"Warning: Could not compute PCK for {stem}: {e}")
     
     # Compute averages
     results = {}
